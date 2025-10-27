@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 Orchestrator module for Compliance Copilot MCP Server.
 
