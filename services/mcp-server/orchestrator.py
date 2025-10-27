@@ -11,18 +11,20 @@ Responsibilities (starter implementation):
 
 This is intentionally a pragmatic, Copilot-friendly skeleton with TODOs for caching, persistent snapshots, rate-limiting, billing hooks, and connector circuit-breakers.
 """
-from typing import Any, Dict, List, Optional
-import os
+
 import asyncio
 import logging
+import os
 from datetime import datetime
+from typing import Any, Optional
 
 try:
     import aioredis
 except Exception:
     aioredis = None  # Redis optional for now
 
-from connectors.kvk_connector import search_company as kvk_search, get_basisprofiel as kvk_basisprofiel
+from connectors.kvk_connector import get_basisprofiel as kvk_basisprofiel
+from connectors.kvk_connector import search_company as kvk_search
 from connectors.opensanctions_connector import search as opensanctions_search
 from core.scoring import compute_risk
 
@@ -33,7 +35,8 @@ CACHE_TTL_SEARCH = int(os.getenv("CACHE_TTL_SEARCH", "900"))  # 15 minutes defau
 CACHE_TTL_PROFILE = int(os.getenv("CACHE_TTL_PROFILE", "86400"))  # 24 hours
 
 # Simple in-process cache fallback (for local dev) when Redis not configured
-_inprocess_cache: Dict[str, Dict[str, Any]] = {}
+_inprocess_cache: dict[str, dict[str, Any]] = {}
+
 
 async def _get_redis() -> Optional[aioredis.Redis]:
     if not aioredis:
@@ -44,6 +47,7 @@ async def _get_redis() -> Optional[aioredis.Redis]:
         logger.warning("Redis not available: %s", e)
         return None
 
+
 async def cache_get(key: str) -> Optional[Any]:
     redis = await _get_redis()
     if redis:
@@ -53,6 +57,7 @@ async def cache_get(key: str) -> Optional[Any]:
                 return None
             # assume JSON stored as bytes
             import json
+
             return json.loads(val)
         except Exception as e:
             logger.debug("Redis get failed for %s: %s", key, e)
@@ -62,11 +67,13 @@ async def cache_get(key: str) -> Optional[Any]:
         return item.get("value")
     return None
 
+
 async def cache_set(key: str, value: Any, ttl: int = 300) -> None:
     redis = await _get_redis()
     if redis:
         try:
             import json
+
             await redis.set(key, json.dumps(value), ex=ttl)
             return
         except Exception as e:
@@ -74,9 +81,11 @@ async def cache_set(key: str, value: Any, ttl: int = 300) -> None:
     # fallback
     _inprocess_cache[key] = {"value": value, "expires_at": datetime.utcnow().timestamp() + ttl}
 
+
 # Utilities
 
-def _normalize_query(query: str) -> Dict[str, Any]:
+
+def _normalize_query(query: str) -> dict[str, Any]:
     q = query.strip()
     result = {
         "raw": q,
@@ -94,7 +103,8 @@ def _normalize_query(query: str) -> Dict[str, Any]:
     result["normalized_name"] = q.lower()
     return result
 
-async def orchestrator_get_company_profile(params: Dict[str, Any]) -> Dict[str, Any]:
+
+async def orchestrator_get_company_profile(params: dict[str, Any]) -> dict[str, Any]:
     """Main orchestrator entrypoint called by the FastAPI handler.
 
     Steps implemented here:
@@ -110,7 +120,7 @@ async def orchestrator_get_company_profile(params: Dict[str, Any]) -> Dict[str, 
     country = params.get("country", "").upper()
     query = params.get("query", "").strip()
     premium = bool(params.get("premium", False))
-    include_history = bool(params.get("include_history", False))
+    # TODO: Feature not yet implemented
 
     norm = _normalize_query(query)
     cache_key = f"profile:{country}:{norm['raw']}:{'premium' if premium else 'basic'}"
@@ -132,7 +142,11 @@ async def orchestrator_get_company_profile(params: Dict[str, Any]) -> Dict[str, 
         "legal_form": None,
         "sbi_codes": [],
     }
-    basic_checks = {"vat_valid": None, "reg_verified": False, "last_data_pull": datetime.utcnow().isoformat() + "Z"}
+    basic_checks = {
+        "vat_valid": None,
+        "reg_verified": False,
+        "last_data_pull": datetime.utcnow().isoformat() + "Z",
+    }
     sanctions_section = {"hits_count": 0, "matches": []}
     audit = {"sources": [], "raw_calls": {}}
 
@@ -155,7 +169,9 @@ async def orchestrator_get_company_profile(params: Dict[str, Any]) -> Dict[str, 
             else:
                 # Search
                 sr = await kvk_search(norm["raw"]) or {}
-                audit["raw_calls"]["kvk_search"] = {"result_count": len(sr.get("data", [])) if isinstance(sr, dict) else None}
+                audit["raw_calls"]["kvk_search"] = {
+                    "result_count": len(sr.get("data", [])) if isinstance(sr, dict) else None
+                }
                 hits = sr.get("data") if isinstance(sr, dict) else []
                 if hits and len(hits) == 1:
                     it = hits[0]
@@ -167,7 +183,9 @@ async def orchestrator_get_company_profile(params: Dict[str, Any]) -> Dict[str, 
                     basic_checks["reg_verified"] = True
                     audit["sources"].append(f"kvk:search:{company.get('kvk_number')}")
                 else:
-                    audit["sources"].append(f"kvk:search:multiple_or_none:{len(hits) if hits is not None else 'unknown'}")
+                    audit["sources"].append(
+                        f"kvk:search:multiple_or_none:{len(hits) if hits is not None else 'unknown'}"
+                    )
         elif country == "BE":
             # TODO: call CBE connector; for now mark skipped
             audit["sources"].append("cbe:skipped")
@@ -186,13 +204,15 @@ async def orchestrator_get_company_profile(params: Dict[str, Any]) -> Dict[str, 
         matches = osr.get("matches") if isinstance(osr, dict) else []
         sanctions_section["hits_count"] = len(matches)
         for m in matches:
-            sanctions_section["matches"].append({
-                "source": m.get("source") or "opensanctions",
-                "entity_id": m.get("id"),
-                "confidence": float(m.get("confidence", 0.8)),
-                "matched_name": m.get("name"),
-                "raw": m.get("raw") if isinstance(m.get("raw", None), dict) else m.get("raw")
-            })
+            sanctions_section["matches"].append(
+                {
+                    "source": m.get("source") or "opensanctions",
+                    "entity_id": m.get("id"),
+                    "confidence": float(m.get("confidence", 0.8)),
+                    "matched_name": m.get("name"),
+                    "raw": m.get("raw") if isinstance(m.get("raw", None), dict) else m.get("raw"),
+                }
+            )
         audit["raw_calls"]["opensanctions"] = {"result_count": sanctions_section["hits_count"]}
         if sanctions_section["hits_count"]:
             audit["sources"].append("opensanctions")
@@ -207,7 +227,7 @@ async def orchestrator_get_company_profile(params: Dict[str, Any]) -> Dict[str, 
         "pep": {"hits_count": 0, "matches": []},
         "ubo": {"missing_and_required": False},
         "status": company.get("status", "unknown"),
-        "recent_name_changes": 0
+        "recent_name_changes": 0,
     }
     risk = compute_risk(scoring_input)
 
@@ -216,7 +236,7 @@ async def orchestrator_get_company_profile(params: Dict[str, Any]) -> Dict[str, 
         "basic_checks": basic_checks,
         "sanctions": sanctions_section,
         "risk_score": risk,
-        "audit": audit
+        "audit": audit,
     }
 
     # 5) cache profile for a longer TTL (profiles change less frequently)
@@ -229,7 +249,7 @@ async def orchestrator_get_company_profile(params: Dict[str, Any]) -> Dict[str, 
 
 
 # Lightweight helper for multiple parallel calls (example usage)
-async def _parallel_map(coros: List[Any]) -> List[Any]:
+async def _parallel_map(coros: list[Any]) -> list[Any]:
     results = await asyncio.gather(*coros, return_exceptions=True)
     return results
 
