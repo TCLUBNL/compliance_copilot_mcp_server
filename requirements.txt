@@ -15,5 +15,5 @@ httpx==0.26.0
 python-dotenv==1.0.0
 
 # Security
-python-multipart==0.0.18
+python-multipart==0.0.20
 cryptography==44.0.1
