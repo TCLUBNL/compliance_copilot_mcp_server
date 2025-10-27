@@ -1,5 +1,7 @@
 """Basic tests to verify the test suite works."""
 
+import asyncio
+
 import pytest
 
 
@@ -21,6 +23,4 @@ async def test_async_works():
 
 
 if __name__ == "__main__":
-    import asyncio
-
     pytest.main([__file__])
