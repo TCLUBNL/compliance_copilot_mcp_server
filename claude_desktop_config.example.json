@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "compliancehub": {
+      "command": "python",
+      "args": ["/absolute/path/to/services/mcp_server/server.py"],
+      "env": {
+        "KVK_API_KEY": "your-kvk-api-key-here",
+        "OPENSANCTIONS_API_KEY": "your-opensanctions-api-key-here"
+      }
+    }
+  }
+}
