@@ -18,9 +18,12 @@ from connectors.kvk_connector import (
     normalize_company_data,
     search_company,
 )
-from connectors.opensanctions_connector import OpenSanctionsError
-from connectors.opensanctions_connector import calculate_risk_score as calculate_sanctions_risk
-from connectors.opensanctions_connector import normalize_match_data, search_entity
+from connectors.opensanctions_connector import (
+    OpenSanctionsError,
+    calculate_risk_score as calculate_sanctions_risk,
+    normalize_match_data,
+    search_entity,
+)
 
 # Version and metadata
 __version__ = "0.1.0"
