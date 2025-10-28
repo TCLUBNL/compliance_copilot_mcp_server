@@ -1,219 +1,17 @@
 """
-OpenSanctions Connector
+OpenSanctions API Connector
 
-Integrates with OpenSanctions API for international sanctions screening.
-Screens entities against OFAC, EU, UN sanctions lists and PEP databases.
-
-API Documentation: https://www.opensanctions.org/docs/api/
+Provides sanctions screening against OpenSanctions database.
 """
 
-import logging
 import os
 from typing import Any, Optional
 
 import httpx
 
-logger = logging.getLogger(__name__)
-
-# OpenSanctions API Configuration
-OPENSANCTIONS_API_KEY = os.getenv("OPENSANCTIONS_API_KEY", "")
-OPENSANCTIONS_BASE_URL = os.getenv("OPENSANCTIONS_BASE_URL", "https://api.opensanctions.org")
-OPENSANCTIONS_TIMEOUT = int(os.getenv("OPENSANCTIONS_TIMEOUT", "30"))
-
-# Default datasets to search
-DEFAULT_DATASETS = [
-    "sanctions",  # All sanctions lists
-    "peps",  # Politically Exposed Persons
-    "crime",  # Criminal watchlists
-]
-
-
-class OpenSanctionsError(Exception):
-    """Base exception for OpenSanctions API errors"""
-
-    pass
-
-
-class OpenSanctionsAPIError(OpenSanctionsError):
-    """OpenSanctions API returned an error"""
-
-    pass
-
-
-class OpenSanctionsNotFoundError(OpenSanctionsError):
-    """Entity not found"""
-
-    pass
-
-
-class OpenSanctionsRateLimitError(OpenSanctionsError):
-    """Rate limit exceeded"""
-
-    pass
-
-
-async def _make_request(
-    endpoint: str,
-    params: Optional[dict[str, Any]] = None,
-    timeout: int = OPENSANCTIONS_TIMEOUT,
-) -> dict[str, Any]:
-    """Make an authenticated request to the OpenSanctions API."""
-    url = f"{OPENSANCTIONS_BASE_URL}{endpoint}"
-    headers = {"Accept": "application/json"}
-
-    if OPENSANCTIONS_API_KEY:
-        headers["Authorization"] = f"Bearer {OPENSANCTIONS_API_KEY}"
-
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            logger.info(f"OpenSanctions API Request: {url} with params {params}")
-            response = await client.get(url, headers=headers, params=params)
-
-            if response.status_code == 404:
-                raise OpenSanctionsNotFoundError(f"Resource not found: {url}")
-            elif response.status_code == 429:
-                raise OpenSanctionsRateLimitError("Rate limit exceeded")
-            elif response.status_code >= 400:
-                raise OpenSanctionsAPIError(f"API error: {response.status_code} - {response.text}")
-
-            response.raise_for_status()
-            data = response.json()
-            logger.info(f"OpenSanctions API Response: {response.status_code}")
-            return data
-
-    except OpenSanctionsError:
-        raise
-    except httpx.TimeoutException as e:
-        logger.error(f"Timeout after {timeout}s")
-        raise OpenSanctionsAPIError(f"Timeout after {timeout}s") from e
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP error: {e}")
-        raise OpenSanctionsAPIError(f"HTTP error: {e}") from e
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        raise OpenSanctionsAPIError(f"Unexpected error: {e}") from e
-
-
-async def search_entity(
-    query: str,
-    schema: str = "Person",
-    datasets: Optional[list[str]] = None,
-    limit: int = 10,
-    fuzzy: bool = True,
-) -> list[dict[str, Any]]:
-    """Search for entities in OpenSanctions database."""
-    if datasets is None:
-        datasets = DEFAULT_DATASETS
-
-    params = {
-        "q": query,
-        "schema": schema,
-        "datasets": ",".join(datasets),
-        "limit": limit,
-        "fuzzy": str(fuzzy).lower(),
-    }
-
-    try:
-        data = await _make_request("/search/", params)
-        results = data.get("results", [])
-        logger.info(f"Found {len(results)} results for query: {query}")
-        return results
-    except OpenSanctionsError:
-        raise
-    except Exception as e:
-        logger.error(f"Error searching entity: {e}")
-        return []
-
-
-async def get_entity(entity_id: str) -> dict[str, Any]:
-    """Get detailed entity information by ID."""
-    endpoint = f"/entities/{entity_id}/"
-    return await _make_request(endpoint)
-
-
-async def match_entity(
-    name: str,
-    schema: str = "Person",
-    birth_date: Optional[str] = None,
-    country: Optional[str] = None,
-    datasets: Optional[list[str]] = None,
-) -> list[dict[str, Any]]:
-    """Match entity with structured data."""
-    if datasets is None:
-        datasets = DEFAULT_DATASETS
-
-    # Build properties
-    properties: dict[str, Any] = {"name": [name]}
-
-    if birth_date:
-        properties["birthDate"] = [birth_date]
-    if country:
-        properties["country"] = [country]
-
-    try:
-        url = f"{OPENSANCTIONS_BASE_URL}/match/"
-        headers = {"Accept": "application/json", "Content-Type": "application/json"}
-
-        if OPENSANCTIONS_API_KEY:
-            headers["Authorization"] = f"Bearer {OPENSANCTIONS_API_KEY}"
-
-        payload = {"schema": schema, "properties": properties}
-
-        async with httpx.AsyncClient(timeout=OPENSANCTIONS_TIMEOUT) as client:
-            logger.info(f"OpenSanctions Match Request: {url}")
-            response = await client.post(url, headers=headers, json=payload)
-
-            if response.status_code == 429:
-                raise OpenSanctionsRateLimitError("Rate limit exceeded")
-            elif response.status_code >= 400:
-                raise OpenSanctionsAPIError(f"API error: {response.status_code}")
-
-            response.raise_for_status()
-            data = response.json()
-            return data.get("results", [])
-
-    except OpenSanctionsError:
-        raise
-    except Exception as e:
-        logger.error(f"Error matching entity: {e}")
-        return []
-
-
-def calculate_risk_score(matches: list[dict[str, Any]]) -> float:
-    """Calculate risk score based on sanctions matches."""
-    if not matches:
-        return 0.0
-
-    max_score = max(m.get("score", 0) for m in matches)
-    risk_score = max_score * 100
-
-    for match in matches:
-        topics = match.get("properties", {}).get("topics", [])
-        if any(topic in ["sanction", "crime", "poi"] for topic in topics):
-            risk_score = min(100, risk_score * 1.5)
-
-    return round(risk_score, 2)
-
-
-def normalize_match_data(match: dict[str, Any]) -> dict[str, Any]:
-    """Normalize OpenSanctions match data to internal schema."""
-    properties = match.get("properties", {})
-
-    return {
-        "entity_id": match.get("id"),
-        "name": properties.get("name", [""])[0] if properties.get("name") else None,
-        "schema": match.get("schema"),
-        "caption": match.get("caption"),
-        "match_score": match.get("score", 0),
-        "datasets": match.get("datasets", []),
-        "topics": properties.get("topics", []),
-        "countries": properties.get("country", []),
-        "birth_date": properties.get("birthDate", [None])[0],
-        "program": properties.get("program", []),
-        "sanctions": properties.get("sanctions", []),
-        "raw_data": match,
-    }
-
+# OpenSanctions API configuration
+OPENSANCTIONS_API_URL = "https://api.opensanctions.org"
+OPENSANCTIONS_API_KEY = os.getenv("OPENSANCTIONS_API_KEY")
 
 # Test entities for development
 TEST_ENTITIES = {
@@ -222,3 +20,164 @@ TEST_ENTITIES = {
     "pep": "Xi Jinping",
     "clean": "John Smith",
 }
+
+
+async def search_entity(
+    name: str,
+    schema: str = "LegalEntity",
+    limit: int = 10,
+    datasets: Optional[list[str]] = None,
+) -> list[dict[str, Any]]:
+    """
+    Search for entities in OpenSanctions database.
+
+    Args:
+        name: Entity name to search for
+        schema: Entity schema type (e.g., 'Person', 'Company', 'Organization', 'LegalEntity')
+        limit: Maximum number of results to return
+        datasets: Optional list of specific datasets to search
+
+    Returns:
+        List of matching entities
+
+    Raises:
+        httpx.HTTPError: If the API request fails
+    """
+    if not OPENSANCTIONS_API_KEY:
+        raise ValueError("OPENSANCTIONS_API_KEY environment variable not set")
+
+    # Prepare request headers with API key
+    headers = {
+        "Authorization": f"Bearer {OPENSANCTIONS_API_KEY}",
+        "Accept": "application/json",
+    }
+
+    # Prepare query parameters
+    params = {
+        "q": name,
+        "schema": schema,
+        "limit": limit,
+    }
+
+    if datasets:
+        params["datasets"] = ",".join(datasets)
+
+    # Make API request
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            f"{OPENSANCTIONS_API_URL}/search/default",
+            headers=headers,
+            params=params,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+    return data.get("results", [])
+
+
+async def get_entity(entity_id: str) -> dict[str, Any]:
+    """
+    Get detailed information about a specific entity.
+
+    Args:
+        entity_id: OpenSanctions entity ID
+
+    Returns:
+        Entity details
+
+    Raises:
+        httpx.HTTPError: If the API request fails
+    """
+    if not OPENSANCTIONS_API_KEY:
+        raise ValueError("OPENSANCTIONS_API_KEY environment variable not set")
+
+    headers = {
+        "Authorization": f"Bearer {OPENSANCTIONS_API_KEY}",
+        "Accept": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            f"{OPENSANCTIONS_API_URL}/entities/{entity_id}",
+            headers=headers,
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+def normalize_match_data(entity: dict[str, Any]) -> dict[str, Any]:
+    """
+    Normalize OpenSanctions entity data to a consistent format.
+
+    Args:
+        entity: Raw entity data from OpenSanctions
+
+    Returns:
+        Normalized entity data
+    """
+    properties = entity.get("properties", {})
+
+    # Extract names (can be multiple)
+    names = properties.get("name", [])
+    primary_name = names[0] if names else entity.get("caption", "Unknown")
+
+    # Extract countries
+    countries = properties.get("country", [])
+
+    # Extract topics (sanction programs, etc.)
+    topics = properties.get("topics", [])
+
+    # Extract dates
+    created_at = properties.get("createdAt", [])
+    modified_at = properties.get("modifiedAt", [])
+
+    return {
+        "id": entity.get("id"),
+        "name": primary_name,
+        "all_names": names,
+        "schema": entity.get("schema"),
+        "countries": countries,
+        "topics": topics,
+        "datasets": entity.get("datasets", []),
+        "created_at": created_at[0] if created_at else None,
+        "modified_at": modified_at[0] if modified_at else None,
+        "caption": entity.get("caption"),
+        "properties": properties,
+    }
+
+
+def calculate_risk_score(results: list[dict[str, Any]]) -> int:
+    """
+    Calculate a risk score based on sanctions screening results.
+
+    Args:
+        results: List of matching entities from OpenSanctions
+
+    Returns:
+        Risk score from 0-100 (0 = no risk, 100 = maximum risk)
+    """
+    if not results:
+        return 0
+
+    # Base score on number of matches
+    base_score = min(len(results) * 15, 60)
+
+    # Increase score based on topics (sanctions, PEP, etc.)
+    max_topic_score = 0
+    high_risk_topics = {
+        "sanction": 40,
+        "crime": 30,
+        "role.pep": 25,
+        "poi": 20,
+        "fin": 15,
+    }
+
+    for entity in results:
+        topics = entity.get("properties", {}).get("topics", [])
+        for topic in topics:
+            for risk_topic, score in high_risk_topics.items():
+                if risk_topic in topic.lower():
+                    max_topic_score = max(max_topic_score, score)
+
+    total_score = min(base_score + max_topic_score, 100)
+    return total_score
