@@ -17,3 +17,4 @@ python-dotenv==1.0.0
 # Security
 python-multipart==0.0.18
 cryptography==44.0.1
+mcp>=1.0.0
