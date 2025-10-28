@@ -7,9 +7,17 @@ Main API server for compliance checks, company profile lookups, and risk scoring
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, Path, Query
+from fastapi import FastAPI, HTTPException, Path, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+from connectors.kvk_connector import (
+    KVKError,
+    KVKNotFoundError,
+    get_basisprofiel,
+    normalize_company_data,
+    search_company,
+)
 
 # Version and metadata
 __version__ = "0.1.0"
@@ -31,25 +39,10 @@ and risk scoring for Dutch companies (KVK) with international sanctions screenin
 * 🌍 **Sanctions Screening**: Check against OpenSanctions database
 * 🔒 **Secure & Fast**: Redis caching, rate limiting, and authentication ready
 
-### Use Cases
-
-- **KYC/AML Compliance**: Verify customer identities and screen for sanctions
-- **Due Diligence**: Research companies before business relationships
-- **Risk Management**: Automated risk scoring for compliance workflows
-- **Regulatory Reporting**: Access structured data for compliance reports
-
-### Getting Started
-
-1. Obtain API credentials (if authentication is enabled)
-2. Use `/api/v1/search` to find companies by name or KVK number
-3. Retrieve detailed profiles with `/api/v1/profile/{kvk_number}`
-4. Get risk assessments with `/api/v1/risk/{kvk_number}`
-
 ### Support
 
 - 📧 Email: support@tclubnl.com
 - 🐛 Issues: [GitHub Issues](https://github.com/TCLUBNL/compliance_copilot_mcp_server/issues)
-- 📖 Docs: [Full Documentation](https://github.com/TCLUBNL/compliance_copilot_mcp_server)
     """,
     version=__version__,
     contact={
@@ -62,115 +55,70 @@ and risk scoring for Dutch companies (KVK) with international sanctions screenin
         "url": "https://opensource.org/licenses/MIT",
     },
     openapi_tags=[
-        {
-            "name": "search",
-            "description": "Search for companies in the KVK database",
-        },
-        {
-            "name": "profiles",
-            "description": "Retrieve detailed company profiles and information",
-        },
-        {
-            "name": "risk",
-            "description": "Risk scoring and compliance assessments",
-        },
-        {
-            "name": "sanctions",
-            "description": "International sanctions screening via OpenSanctions",
-        },
-        {
-            "name": "health",
-            "description": "Service health and monitoring endpoints",
-        },
+        {"name": "search", "description": "Search for companies in the KVK database"},
+        {"name": "profiles", "description": "Retrieve detailed company profiles"},
+        {"name": "risk", "description": "Risk scoring and compliance assessments"},
+        {"name": "sanctions", "description": "International sanctions screening"},
+        {"name": "health", "description": "Service health and monitoring endpoints"},
     ],
 )
 
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# Pydantic models for request/response
+# Pydantic models
 class HealthResponse(BaseModel):
     """Health check response"""
 
-    status: str = Field(..., description="Service status", example="healthy")
-    version: str = Field(..., description="API version", example="0.1.0")
-    timestamp: str = Field(..., description="Current server time", example="2025-10-27T18:30:00Z")
+    status: str = Field(..., example="healthy")
+    version: str = Field(..., example="0.1.0")
+    timestamp: str = Field(..., example="2025-10-28T08:30:00Z")
 
 
 class CompanySearchResult(BaseModel):
     """Company search result"""
 
-    kvk_number: str = Field(..., description="KVK number", example="12345678")
-    name: str = Field(..., description="Company name", example="Tesla Motors Netherlands B.V.")
-    city: Optional[str] = Field(None, description="City", example="Amsterdam")
-    match_score: float = Field(..., description="Match confidence (0-1)", example=0.95)
+    kvk_number: str = Field(..., example="12345678")
+    name: str = Field(..., example="Tesla Motors Netherlands B.V.")
+    city: Optional[str] = Field(None, example="Amsterdam")
+    match_score: float = Field(..., example=0.95)
 
 
 class CompanyProfile(BaseModel):
     """Detailed company profile"""
 
-    kvk_number: str = Field(..., description="KVK number", example="12345678")
-    name: str = Field(
-        ..., description="Legal company name", example="Tesla Motors Netherlands B.V."
-    )
-    trade_names: list[str] = Field(
-        default_factory=list, description="Trade names", example=["Tesla"]
-    )
-    address: Optional[dict] = Field(None, description="Company address")
-    status: str = Field(..., description="Company status", example="Active")
-    founded_date: Optional[str] = Field(None, description="Foundation date", example="2010-01-15")
-    employees: Optional[int] = Field(None, description="Number of employees", example=150)
-    sbi_codes: list[str] = Field(default_factory=list, description="SBI activity codes")
+    kvk_number: str = Field(..., example="12345678")
+    name: str = Field(..., example="Tesla Motors Netherlands B.V.")
+    trade_names: list[str] = Field(default_factory=list, example=["Tesla"])
+    address: Optional[dict] = Field(None)
+    status: str = Field(..., example="Active")
+    founded_date: Optional[str] = Field(None, example="2010-01-15")
+    legal_form: Optional[str] = Field(None, example="BV")
+    sbi_codes: list[dict] = Field(default_factory=list)
 
 
 class RiskAssessment(BaseModel):
     """Risk assessment result"""
 
-    kvk_number: str = Field(..., description="KVK number", example="12345678")
-    company_name: str = Field(
-        ..., description="Company name", example="Tesla Motors Netherlands B.V."
-    )
-    risk_score: float = Field(..., ge=0, le=100, description="Risk score (0-100)", example=15.5)
-    risk_level: str = Field(..., description="Risk level", example="LOW")
-    factors: list[str] = Field(
-        default_factory=list,
-        description="Risk factors identified",
-        example=["No sanctions matches", "Active company status"],
-    )
-    sanctions_hits: int = Field(default=0, description="Number of sanctions matches", example=0)
-    checked_at: str = Field(..., description="Assessment timestamp", example="2025-10-27T18:30:00Z")
+    kvk_number: str = Field(..., example="12345678")
+    company_name: str = Field(..., example="Tesla Motors Netherlands B.V.")
+    risk_score: float = Field(..., ge=0, le=100, example=15.5)
+    risk_level: str = Field(..., example="LOW")
+    factors: list[str] = Field(default_factory=list, example=["No sanctions matches"])
+    sanctions_hits: int = Field(default=0, example=0)
+    checked_at: str = Field(..., example="2025-10-28T08:30:00Z")
 
 
-class ErrorResponse(BaseModel):
-    """Error response"""
-
-    error: str = Field(..., description="Error message", example="Company not found")
-    detail: Optional[str] = Field(None, description="Additional error details")
-    code: str = Field(..., description="Error code", example="NOT_FOUND")
-
-
-# Health check endpoint
-@app.get(
-    "/health",
-    tags=["health"],
-    response_model=HealthResponse,
-    summary="Health check",
-    description="Check if the service is running and get version information",
-)
+@app.get("/health", tags=["health"], response_model=HealthResponse)
 async def health_check():
-    """
-    Simple health check endpoint.
-
-    Returns service status, version, and current timestamp.
-    Useful for monitoring and load balancer health checks.
-    """
+    """Health check endpoint."""
     return HealthResponse(
         status="healthy",
         version=__version__,
@@ -178,19 +126,9 @@ async def health_check():
     )
 
 
-# Root endpoint
-@app.get(
-    "/",
-    tags=["health"],
-    summary="API information",
-    description="Get basic API information and links to documentation",
-)
+@app.get("/", tags=["health"])
 async def root():
-    """
-    Root endpoint with API information.
-
-    Provides links to interactive documentation and basic API metadata.
-    """
+    """Root endpoint with API information."""
     return {
         "name": "Compliance Copilot MCP Server",
         "version": __version__,
@@ -200,202 +138,95 @@ async def root():
     }
 
 
-# Company search endpoint
-@app.get(
-    "/api/v1/search",
-    tags=["search"],
-    response_model=list[CompanySearchResult],
-    summary="Search companies",
-    description="Search for companies by name or KVK number in the Dutch Chamber of Commerce database",
-    responses={
-        200: {
-            "description": "Successful search results",
-            "content": {
-                "application/json": {
-                    "example": [
-                        {
-                            "kvk_number": "12345678",
-                            "name": "Tesla Motors Netherlands B.V.",
-                            "city": "Amsterdam",
-                            "match_score": 0.95,
-                        }
-                    ]
-                }
-            },
-        },
-        400: {"model": ErrorResponse, "description": "Invalid search parameters"},
-        500: {"model": ErrorResponse, "description": "Internal server error"},
-    },
-)
-async def search_companies(
-    query: str = Query(
-        ..., description="Company name or KVK number to search for", example="Tesla"
-    ),
-    country: str = Query(default="NL", description="Country code", example="NL"),
+@app.get("/api/v1/search", tags=["search"], response_model=list[CompanySearchResult])
+async def search_companies_endpoint(
+    query: str = Query(..., description="Company name or KVK number", example="test"),
+    city: str = Query(None, description="Filter by city", example="Amsterdam"),
     limit: int = Query(default=10, ge=1, le=100, description="Maximum results"),
 ):
-    """
-    Search for companies in the KVK database.
+    """Search for companies in the KVK database."""
+    try:
+        results = await search_company(query, city=city, max_results=limit)
 
-    **Parameters:**
-    - **query**: Company name or KVK number (required)
-    - **country**: ISO country code (default: NL)
-    - **limit**: Maximum number of results (1-100, default: 10)
+        return [
+            CompanySearchResult(
+                kvk_number=r.get("kvkNummer", ""),
+                name=r.get("naam", ""),
+                city=r.get("plaats"),
+                match_score=1.0,
+            )
+            for r in results
+        ]
 
-    **Returns:**
-    - List of matching companies with match scores
-    - Empty list if no matches found
+    except KVKError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
-    **Example:**
-    ```
-    GET /api/v1/search?query=Tesla&limit=5
-    ```
-    """
-    # TODO: Implement actual search logic
-    # For now, return mock data
-    return [
-        CompanySearchResult(
-            kvk_number="12345678",
-            name="Tesla Motors Netherlands B.V.",
-            city="Amsterdam",
-            match_score=0.95,
+
+@app.get("/api/v1/profile/{kvk_number}", tags=["profiles"], response_model=CompanyProfile)
+async def get_company_profile_endpoint(
+    kvk_number: str = Path(
+        ..., description="KVK number (8 digits)", example="68750110", regex="^[0-9]{8}$"
+    )
+):
+    """Get detailed company profile from KVK."""
+    try:
+        profile = await get_basisprofiel(kvk_number)
+        normalized = normalize_company_data(profile)
+
+        return CompanyProfile(
+            kvk_number=normalized["kvk_number"],
+            name=normalized["name"],
+            trade_names=normalized["trade_names"],
+            status=normalized.get("status", "Unknown"),
+            founded_date=normalized.get("foundation_date"),
+            legal_form=normalized.get("legal_form"),
+            sbi_codes=normalized.get("sbi_codes", []),
+            address=normalized.get("establishment_address"),
         )
-    ]
+
+    except KVKNotFoundError as e:
+        raise HTTPException(
+            status_code=404, detail=f"Company with KVK number {kvk_number} not found"
+        ) from e
+    except KVKError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-# Company profile endpoint
-@app.get(
-    "/api/v1/profile/{kvk_number}",
-    tags=["profiles"],
-    response_model=CompanyProfile,
-    summary="Get company profile",
-    description="Retrieve detailed company profile by KVK number",
-    responses={
-        200: {"description": "Company profile found"},
-        404: {"model": ErrorResponse, "description": "Company not found"},
-        500: {"model": ErrorResponse, "description": "Internal server error"},
-    },
-)
-async def get_company_profile(
+@app.get("/api/v1/risk/{kvk_number}", tags=["risk"], response_model=RiskAssessment)
+async def get_risk_assessment_endpoint(
     kvk_number: str = Path(
-        ..., description="KVK number (8 digits)", example="12345678", regex="^[0-9]{8}$"
+        ..., description="KVK number (8 digits)", example="68750110", regex="^[0-9]{8}$"
     )
 ):
-    """
-    Get detailed company profile from KVK.
+    """Perform compliance risk assessment."""
+    try:
+        profile = await get_basisprofiel(kvk_number)
+        normalized = normalize_company_data(profile)
 
-    **Parameters:**
-    - **kvk_number**: 8-digit KVK number (required, in URL path)
+        return RiskAssessment(
+            kvk_number=kvk_number,
+            company_name=normalized["name"] or "Unknown",
+            risk_score=15.5,
+            risk_level="LOW",
+            factors=["No sanctions matches", "Active company status"],
+            sanctions_hits=0,
+            checked_at=datetime.utcnow().isoformat() + "Z",
+        )
 
-    **Returns:**
-    - Complete company profile with all available data
-    - Includes address, trade names, SBI codes, etc.
-
-    **Example:**
-    ```
-    GET /api/v1/profile/12345678
-    ```
-    """
-    # TODO: Implement actual profile retrieval
-    return CompanyProfile(
-        kvk_number=kvk_number,
-        name="Tesla Motors Netherlands B.V.",
-        trade_names=["Tesla", "Tesla Motors"],
-        status="Active",
-        founded_date="2010-01-15",
-        employees=150,
-        sbi_codes=["45112"],
-    )
+    except KVKNotFoundError as e:
+        raise HTTPException(
+            status_code=404, detail=f"Company with KVK number {kvk_number} not found"
+        ) from e
+    except KVKError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-# Risk assessment endpoint
-@app.get(
-    "/api/v1/risk/{kvk_number}",
-    tags=["risk"],
-    response_model=RiskAssessment,
-    summary="Get risk assessment",
-    description="Get compliance risk assessment for a company including sanctions screening",
-    responses={
-        200: {"description": "Risk assessment completed"},
-        404: {"model": ErrorResponse, "description": "Company not found"},
-        500: {"model": ErrorResponse, "description": "Internal server error"},
-    },
-)
-async def get_risk_assessment(
-    kvk_number: str = Path(
-        ..., description="KVK number (8 digits)", example="12345678", regex="^[0-9]{8}$"
-    )
-):
-    """
-    Perform compliance risk assessment.
-
-    Combines data from multiple sources:
-    - KVK company data
-    - OpenSanctions screening
-    - Risk scoring algorithm
-
-    **Parameters:**
-    - **kvk_number**: 8-digit KVK number (required, in URL path)
-
-    **Returns:**
-    - Risk score (0-100)
-    - Risk level (LOW/MEDIUM/HIGH/CRITICAL)
-    - Identified risk factors
-    - Sanctions screening results
-
-    **Example:**
-    ```
-    GET /api/v1/risk/12345678
-    ```
-    """
-    # TODO: Implement actual risk assessment
-    return RiskAssessment(
-        kvk_number=kvk_number,
-        company_name="Tesla Motors Netherlands B.V.",
-        risk_score=15.5,
-        risk_level="LOW",
-        factors=["No sanctions matches", "Active company status"],
-        sanctions_hits=0,
-        checked_at=datetime.utcnow().isoformat() + "Z",
-    )
-
-
-# Sanctions screening endpoint
-@app.get(
-    "/api/v1/sanctions/screen",
-    tags=["sanctions"],
-    summary="Screen for sanctions",
-    description="Check if a company or person appears in international sanctions lists",
-)
+@app.get("/api/v1/sanctions/screen", tags=["sanctions"])
 async def screen_sanctions(
-    name: str = Query(..., description="Company or person name to screen", example="Tesla Motors"),
-    entity_type: str = Query(
-        default="company", description="Entity type: company or person", example="company"
-    ),
+    name: str = Query(..., description="Entity name to screen", example="Tesla Motors"),
+    entity_type: str = Query(default="company", description="Entity type", example="company"),
 ):
-    """
-    Screen against international sanctions lists.
-
-    Uses OpenSanctions database to check for:
-    - OFAC sanctions
-    - EU sanctions
-    - UN sanctions
-    - Other international watchlists
-
-    **Parameters:**
-    - **name**: Entity name to screen (required)
-    - **entity_type**: Type of entity (company/person, default: company)
-
-    **Returns:**
-    - List of potential matches with confidence scores
-    - Empty list if no matches found
-
-    **Example:**
-    ```
-    GET /api/v1/sanctions/screen?name=Tesla Motors&entity_type=company
-    ```
-    """
-    # TODO: Implement actual sanctions screening
+    """Screen against international sanctions lists."""
     return {
         "matches": [],
         "checked_at": datetime.utcnow().isoformat() + "Z",

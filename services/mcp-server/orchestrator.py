@@ -23,10 +23,11 @@ try:
 except Exception:
     aioredis = None  # Redis optional for now
 
+from core.scoring import compute_risk
+
 from connectors.kvk_connector import get_basisprofiel as kvk_basisprofiel
 from connectors.kvk_connector import search_company as kvk_search
 from connectors.opensanctions_connector import search as opensanctions_search
-from core.scoring import compute_risk
 
 logger = logging.getLogger("mcp-orchestrator")
 
