@@ -6,10 +6,16 @@ Model Context Protocol server exposing compliance tools for LLMs.
 
 import logging
 import sys
+from pathlib import Path
 from typing import Optional
 
-from mcp.server.fastmcp import FastMCP
+# Add project root to Python path
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
 
+from mcp.server.fastmcp import FastMCP  # noqa: E402
+
+# Configure logging to stderr
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -18,9 +24,9 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP(name="ComplianceHub", version="1.0.0")
+mcp = FastMCP(name="ComplianceHub")
 
-# Import connectors
+# Import connectors  # noqa: E402
 try:
     from connectors.kvk_connector import get_basisprofiel, normalize_company_data, search_company
     from connectors.opensanctions_connector import calculate_risk_score as calculate_sanctions_risk
@@ -48,7 +54,12 @@ async def search_dutch_company(
             }
             for r in results
         ]
-        return {"success": True, "query": query, "count": len(companies), "companies": companies}
+        return {
+            "success": True,
+            "query": query,
+            "count": len(companies),
+            "companies": companies,
+        }
     except Exception as e:
         logger.error(f"Error: {e}")
         return {"success": False, "error": str(e)}
